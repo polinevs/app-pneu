@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps, ImageFilter
 
 # OCR opcional
 OCR_AVAILABLE = True
@@ -44,7 +44,7 @@ MARCAS = [
     "Michelin", "Goodyear", "Pirelli", "Bridgestone", "Continental",
     "Firestone", "Dunlop", "Toyo", "Yokohama", "Hankook",
     "Kumho", "Sailun", "Apollo", "Triangle", "Double Coin",
-    "BKT", "Linglong", "General Tire",
+    "BKT", "Linglong", "General Tire", "Pirelli", "BFGoodrich",
 ]
 
 # =========================
@@ -111,16 +111,29 @@ def cargar_registros(f_empresa="", f_matricula="", f_marca=""):
 # FUNCIONES OCR
 # =========================
 def limpiar_texto(txt: str) -> str:
-    return re.sub(r"\s+", " ", txt.replace("\n", " ")).strip()
+    txt = txt.replace("\n", " ")
+    txt = re.sub(r"\s+", " ", txt)
+    return txt.strip()
+
+
+def preprocesar_imagen(img: Image.Image) -> Image.Image:
+    img = img.convert("L")
+    img = ImageOps.exif_transpose(img)
+    img = ImageOps.autocontrast(img)
+    img = img.resize((img.width * 2, img.height * 2))
+    img = img.filter(ImageFilter.SHARPEN)
+    return img
 
 
 def leer_ocr(img: Image.Image) -> str:
     if not OCR_AVAILABLE:
         return ""
     try:
-        texto = pytesseract.image_to_string(img, lang="eng")
+        img_proc = preprocesar_imagen(img)
+        texto = pytesseract.image_to_string(img_proc, lang="eng", config="--psm 6")
         return limpiar_texto(texto)
-    except Exception:
+    except Exception as e:
+        st.error(f"Error OCR: {e}")
         return ""
 
 
@@ -128,12 +141,13 @@ def extraer_medida(txt: str) -> str:
     patrones = [
         r"\b\d{3}/\d{2}\s?R\d{2}(?:\.\d)?\b",
         r"\b\d{3}/\d{2}R\d{2}(?:\.\d)?\b",
+        r"\b\d{3}/\d{2}\s?ZR\d{2}(?:\.\d)?\b",
         r"\b\d{2,3}R\d{2}(?:\.\d)?\b",
     ]
     for patron in patrones:
         m = re.search(patron, txt, re.IGNORECASE)
         if m:
-            return m.group(0).upper()
+            return m.group(0).upper().replace("ZR", "R")
     return ""
 
 
@@ -154,16 +168,18 @@ def extraer_modelo(txt: str, marca: str) -> str:
         idx = txt.lower().find(marca.lower())
         resto = txt[idx + len(marca):].strip()
         palabras = resto.split()
-        return " ".join(palabras[:3]).strip(" -_/,. ")
+        modelo = " ".join(palabras[:4]).strip(" -_/,. ")
+        return modelo
     return ""
 
 
 def analizar_imagen(img: Image.Image):
+    imagen_preprocesada = preprocesar_imagen(img)
     texto = leer_ocr(img)
     medida = extraer_medida(texto)
     marca = extraer_marca(texto)
     modelo = extraer_modelo(texto, marca)
-    return texto, medida, marca, modelo
+    return imagen_preprocesada, texto, medida, marca, modelo
 
 # =========================
 # UTILIDADES
@@ -192,11 +208,16 @@ init_db()
 st.title("🚚 Control de Neumáticos")
 st.caption("Versión móvil para registrar cambios de neumáticos directamente desde el teléfono")
 
+if OCR_AVAILABLE:
+    st.success("OCR activo")
+else:
+    st.error("OCR no disponible. Revisa la instalación de pytesseract y Tesseract OCR en el deploy.")
+
 pestanas = st.tabs(["📷 Nuevo registro", "📋 Histórico"])
 
 with pestanas[0]:
     st.subheader("Nuevo registro")
-    st.info("Haz una foto del neumático, revisa los datos y guarda el registro.")
+    st.info("Haz una foto del neumático, revisa los datos detectados y guarda el registro.")
 
     fuente_imagen = st.radio(
         "Origen de la foto",
@@ -218,17 +239,18 @@ with pestanas[0]:
 
     if archivo_imagen:
         imagen = Image.open(archivo_imagen)
-        st.image(imagen, caption="Imagen capturada", use_container_width=True)
+        st.image(imagen, caption="Imagen original", use_container_width=True)
 
         with st.spinner("Analizando imagen..."):
-            texto_ocr, medida_detectada, marca_detectada, modelo_detectado = analizar_imagen(imagen)
+            imagen_preprocesada, texto_ocr, medida_detectada, marca_detectada, modelo_detectado = analizar_imagen(imagen)
 
-        if not OCR_AVAILABLE:
-            st.warning("OCR no está instalado. Los campos automáticos deberán completarse manualmente.")
+        st.image(imagen_preprocesada, caption="Imagen preprocesada para OCR", use_container_width=True)
 
         if texto_ocr:
             with st.expander("Texto detectado en la imagen"):
                 st.write(texto_ocr)
+        else:
+            st.warning("No se detectó texto automáticamente. Prueba con una foto más cercana, con buena luz y enfocando la zona lateral del neumático.")
 
     fecha = st.date_input("Fecha", value=datetime.now().date())
 
@@ -265,7 +287,6 @@ with pestanas[0]:
                 ruta_foto,
             ))
             st.success("Registro guardado correctamente.")
-            st.balloons()
 
 with pestanas[1]:
     st.subheader("Histórico")
